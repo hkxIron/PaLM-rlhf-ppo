@@ -22,6 +22,7 @@ def get_logprob_at(logits, seq):
     return rearrange(log_prob, '... 1 -> ...')
 
 class ImplicitPRM(Module):
+    # NOTE: 过程奖励模型
     """ PRM stands for process reward model,
     an openai paper that shows that rewarding the steps a model takes to its outcome is better than
     only rewarding based on final answer or outcome. basically same as when a teacher gives you some credit
@@ -65,7 +66,7 @@ class ImplicitPRM(Module):
         ref_log_prob = get_logprob_at(ref_model_logits, target_seq)
 
         # main formula is DPO-like, and has some connection with Q-learning https://arxiv.org/abs/2404.12358 . it is all connected
-
+        # kl divergence between the two models, but with a beta factor to make it more stable
         implicit_rewards = self.beta * (log_prob - ref_log_prob)
 
         # zero out rewards in padding
@@ -80,7 +81,7 @@ class ImplicitPRM(Module):
         labels = rearrange(labels, 'b -> b 1')
 
         # otherwise use the cross entropy formulation from their paper (eq 5)
-
+        # binary cross entropy loss = y*log(p) + (1-y)*log(1-p)
         loss = (
             labels * logsigmoid(implicit_rewards) +
             (1. - labels) * logsigmoid(-implicit_rewards)  # (1. - sigmoid(x)) == sigmoid(-x)

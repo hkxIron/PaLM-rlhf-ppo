@@ -182,7 +182,7 @@ class ActorCritic(Module):
         mask = None,
         return_values = True
     ):
-        action_logits = self.actor_palm(
+        action_logits = self.actor_palm.forward(
             x,
             finetune_scope = self.actor_lora_scope
         )
@@ -191,10 +191,10 @@ class ActorCritic(Module):
             return action_logits, None
 
         if self.critic_is_prm:
-            values = self.critic(x)
+            values = self.critic.forward(x)
             return action_logits, values
 
-        critic_embeds = self.critic(
+        critic_embeds = self.critic.forward(
             x,
             return_only_embedding = True,
             finetune_scope = self.critic_lora_scope
@@ -283,6 +283,19 @@ def log_prob(prob, indices):
     assert prob.shape[:2] == indices.shape, f'preceding shapes of prob {prob.shape[:2]} and indices {indices.shape} must match'
     return log(prob.gather(-1, indices[..., None])).squeeze(-1)
 
+"""
+# 原始张量
+t = torch.tensor([1, 2, 3, 4, 5])
+# shift(t, 0, 1, -1) 效果：
+# 左侧填充1个0: [0, 1, 2, 3, 4, 5]
+# 右侧裁剪1个元素: [0, 1, 2, 3, 4]
+# 结果: [0, 1, 2, 3, 4]
+
+这个实现会改变张量的形状（因为填充）
+主要用于序列数据的时序平移
+对于正shift，数据向右移动，左侧填充
+对于负shift，数据向左移动，右侧填充
+"""
 def shift(t, value = 0, shift = 1, dim = -1):
     zeros = (0, 0) * (-dim - 1)
     return F.pad(t, (*zeros, shift, -shift), value = value)
@@ -396,7 +409,6 @@ class RLHFTrainer(Module):
 
         # critic outputs reward bin prediction
         # for classification loss, buying into "Stop Regressing" paper from Farebrother et al. https://arxiv.org/abs/2403.03950
-
         self.critic_hl_gauss_loss = HLGaussLoss(num_bins = critic_num_pred_bins, **hl_gauss_loss_kwargs).to(palm.device)
 
         # train hyperparameters
@@ -479,7 +491,7 @@ class RLHFTrainer(Module):
             **kwargs
         )
 
-        rewards = reward_model(
+        rewards = reward_model.forward(
             sequences,
             prompt_mask = prompt_mask,
             mask = mask
@@ -502,7 +514,7 @@ class RLHFTrainer(Module):
 
         # prepare dataloader for policy phase training
 
-        dl = create_dataloader(all_memories_stacked_and_padded, self.minibatch_size, device = self.device)
+        dataloader = create_dataloader(all_memories_stacked_and_padded, self.minibatch_size, device = self.device)
 
         self.actor_critic.train()
 
@@ -511,49 +523,45 @@ class RLHFTrainer(Module):
         for _ in range(self.epochs):
 
             for (
-                sequences,
-                prompt_masks,
-                masks,
-                old_action_probs,
-                old_log_probs,
-                rewards,
-                old_values_bins
-            ) in dl:
+                    trajectory_seq,
+                    prompt_masks,
+                    masks,
+                    old_action_probs,
+                    old_log_probs,
+                    rewards,
+                    old_values_pred
+            ) in dataloader:
 
                 action_masks = ~prompt_masks & masks
 
-                action_logits, values_bins = self.actor_critic(
-                    sequences,
-                    mask = action_masks
-                )
+                action_logits, values_pred = self.actor_critic.forward(trajectory_seq, mask = action_masks)
 
                 action_logits = shift(action_logits, shift = 1, dim = -2) # need to shift along sequence dimension by 1, since actions start from the last prompt (state) token
                 action_len = old_log_probs.shape[-1]
 
                 action_probs = action_logits.softmax(dim = -1)
-                action_log_probs = log_prob(action_probs, sequences)
+                action_log_probs = log_prob(action_probs, trajectory_seq)
+                # 只取response部分的log_probs
                 action_log_probs = action_log_probs[:, -action_len:]
 
                 # calculate entropies, taking into account which part of the sequence is actually an action
-
                 entropies = masked_entropy(action_probs, mask = action_masks)
 
                 # calculate kl div between old action probs and new ones, taking into account which part of the sequence is action or not
-
                 kl_penalty = 0.
 
                 if self.kl_div_loss_weight > 0:
                     kl_penalty = masked_kl_div(old_action_probs, action_probs, mask = action_masks) * self.kl_div_loss_weight
 
                 # subtract the kl penalty from the rewards
-
                 rewards = rewards - kl_penalty
+                # NOTE: 并没有GAE
 
                 # convert binned value predictions to scalar value
 
-                to_pred_value = self.critic_hl_gauss_loss.transform_from_logits
+                to_pred_value_fn = self.critic_hl_gauss_loss.transform_from_logits
 
-                old_values, values = map(to_pred_value, (old_values_bins, values_bins))
+                old_values, values = map(to_pred_value_fn, (old_values_pred, values_pred))
 
                 # handle non-pooled values
 
@@ -562,6 +570,7 @@ class RLHFTrainer(Module):
                 if old_values.ndim == 2:
                     old_values, values = map(lambda t: shift(t, shift = 1, dim = -2), (old_values, values))
 
+                    # 只取response部分的critic_value
                     old_values = old_values[:, -action_len:]
                     values = values[:, -action_len:]
                     rewards = rearrange(rewards, 'b -> b 1')
@@ -572,25 +581,25 @@ class RLHFTrainer(Module):
 
                 # calculate clipped surrogate objective, classic PPO loss
 
-                ratios = (action_log_probs - old_log_probs).exp()
+                importance_sampling_ratios = (action_log_probs - old_log_probs).exp()
                 advantages = masked_normalize(rewards - old_values, **normalize_kwargs)
 
                 if advantages.ndim == 1:
                     advantages = rearrange(advantages, 'b -> b 1')
 
-                surr1 = ratios * advantages
-                surr2 = ratios.clamp(1 - self.eps_clip, 1 + self.eps_clip) * advantages
-                policy_loss = - torch.min(surr1, surr2) - self.beta_s * entropies
+                # PPO loss
+                surr1 = importance_sampling_ratios * advantages
+                surr2 = importance_sampling_ratios.clamp(1 - self.eps_clip, 1 + self.eps_clip) * advantages
+                # 保持熵越大越好, 即多样性会越高
+                actor_policy_loss = - torch.min(surr1, surr2) - self.beta_s * entropies
 
                 # combine losses
-
-                loss = policy_loss.mean()
+                loss = actor_policy_loss.mean()
 
                 # update actor
-
                 self.accelerate.backward(loss)
 
-                self.print(f'policy_loss: {loss.item():.3f}')
+                self.print(f'actor_policy_loss: {loss.item():.3f}')
 
                 if exists(self.max_norm):
                     self.accelerator.clip_grad_norm_(self.actor_critic.actor_parameters(), self.max_norm)
@@ -599,19 +608,18 @@ class RLHFTrainer(Module):
                 self.actor_optim.zero_grad()
 
                 # calculate clipped value loss and update value network separate from policy network
-
                 value_clipped = old_values + (values - old_values).clamp(-self.value_clip, self.value_clip)
-
                 rewards.detach_()
 
+                # NOTE: critic_loss = F.MSELoss(value_clipped, rewards)
                 value_loss_1 = self.critic_hl_gauss_loss(value_clipped, rewards, reduction = 'none')
-                value_loss_2 = self.critic_hl_gauss_loss(values_bins, rewards, reduction = 'none')
+                value_loss_2 = self.critic_hl_gauss_loss(values_pred, rewards, reduction ='none')
 
-                value_loss = torch.maximum(value_loss_1, value_loss_2).mean()
+                critic_value_loss = torch.maximum(value_loss_1, value_loss_2).mean()
 
-                self.print(f'critic_loss: {value_loss.item():.3f}')
+                self.print(f'critic_loss: {critic_value_loss.item():.3f}')
 
-                self.accelerate.backward(value_loss)
+                self.accelerate.backward(critic_value_loss)
 
                 if exists(self.max_norm):
                     self.accelerator.clip_grad_norm_(self.actor_critic.critic_parameters(), self.max_norm)
@@ -619,6 +627,7 @@ class RLHFTrainer(Module):
                 self.critic_optim.step()
                 self.critic_optim.zero_grad()
 
+    # actor rollout
     def train(
         self,
         num_episodes = 50000,
@@ -666,7 +675,7 @@ class RLHFTrainer(Module):
                 使代码更通用，适用于不同维度的张量
                 """
                 # get predicted sequence
-                ( actions, sequence, mask, prompt_mask, action_logits, values_bins) = self.actor_critic_generate(rearrange(state, 'n ... -> 1 n ...'), max_seq_len = max_seq_len, eos_token = eos_token, temperature = temperature, return_values = True )
+                (actions, sequence, mask, prompt_mask, action_logits, values_bins) = self.actor_critic_generate.forward(rearrange(state, 'n ... -> 1 n ...'), max_seq_len = max_seq_len, eos_token = eos_token, temperature = temperature, return_values = True )
 
                 action_logits = shift(action_logits, shift = 1, dim = -2) # need to shift along sequence dimension by 1, since actions start from the last prompt (state) token
 
@@ -689,17 +698,16 @@ class RLHFTrainer(Module):
                 prompt_mask = rearrange(prompt_mask, 'n -> 1 n')
                 mask = default(mask, lambda: torch.ones(sequence.shape, dtype = torch.bool, device = device))
 
-                reward = self.reward_model(
+                reward = self.reward_model.forward(
                     sequence,
                     prompt_mask = prompt_mask,
                     mask = mask
                 )
 
-                detach_to_cpu_ = lambda t: rearrange(t.detach().cpu(), '1 ... -> ...')
+                detach_to_cpu_fn = lambda t: rearrange(t.detach().cpu(), '1 ... -> ...')
 
                 # store memory for learning
-
-                memories.append(Memory(*map(detach_to_cpu_, (
+                memories.append(Memory(*map(detach_to_cpu_fn, (
                     sequence,
                     prompt_mask,
                     mask,

@@ -39,7 +39,7 @@ def decode_tokens(tokens):
 
 # accelerator
 
-accelerator = Accelerator(gradient_accumulation_steps=GRADIENT_ACCUMULATE_EVERY)
+accelerator = Accelerator(gradient_accumulation_steps=GRADIENT_ACCUMULATE_EVERY) # 梯度累积
 device = accelerator.device
 
 # instantiate palm

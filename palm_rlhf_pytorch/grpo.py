@@ -379,7 +379,7 @@ class RLHFTrainer(Module):
             **kwargs
         )
 
-        rewards = reward_model(
+        rewards = reward_model.forward(
             sequences,
             prompt_mask = prompt_mask,
             mask = mask
@@ -402,9 +402,9 @@ class RLHFTrainer(Module):
 
         # prepare dataloader for policy phase training
 
-        dl = create_dataloader(all_memories_stacked_and_padded, self.minibatch_size, device = self.device)
+        dataloader = create_dataloader(all_memories_stacked_and_padded, self.minibatch_size, device = self.device)
 
-        self.actor.train()
+        self.actor.train() # rollout
 
         # GRPO training
 
@@ -416,10 +416,10 @@ class RLHFTrainer(Module):
                 old_action_probs,
                 old_log_probs,
                 advantages,
-            ) in dl:
+            ) in dataloader:
                 action_masks = ~prompt_masks & masks
 
-                action_logits = self.actor(
+                action_logits = self.actor.forward(
                     sequences,
                     mask = action_masks
                 )
@@ -433,7 +433,7 @@ class RLHFTrainer(Module):
                 action_log_probs = action_log_probs[:, -action_len:]
 
                 # calculate entropies, taking into account which part of the sequence is actually an action
-
+                # 熵越大越好，保持探索性
                 per_token_entropies = entropy(action_probs)
 
                 # calculate kl div between old action probs and new ones, taking into account which part of the sequence is action or not
@@ -441,10 +441,10 @@ class RLHFTrainer(Module):
                 kl_penalty = 0.
 
                 if self.kl_div_loss_weight > 0:
+                    # calculate kl div between old action probs and new ones, taking into account which part of the sequence is action or not
                     kl_penalty = masked_kl_div(old_action_probs, action_probs, mask = action_masks) * self.kl_div_loss_weight
 
                 # subtract the kl penalty from the advantages
-
                 advantages = advantages - kl_penalty
 
                 # to encourage exploration, they add per token entropies
@@ -464,16 +464,17 @@ class RLHFTrainer(Module):
 
                 # calculate clipped surrogate objective, classic PPO loss
 
-                ratios = (action_log_probs - old_log_probs).exp()
+                importance_sampling_ratios = (action_log_probs - old_log_probs).exp()
 
                 # SPO - Line 14 Algorithm 1 - https://arxiv.org/abs/2401.16025v9
                 # else classic ppo
 
                 if self.use_spo:
-                    policy_loss = - (ratios * advantages) + (ratios - 1.).square() * (advantages.abs() / (2 * self.eps_clip))
+                    policy_loss = - (importance_sampling_ratios * advantages) + (importance_sampling_ratios - 1.).square() * (advantages.abs() / (2 * self.eps_clip))
                 else:
-                    surr1 = ratios * advantages
-                    surr2 = ratios.clamp(1 - self.eps_clip, 1 + self.eps_clip) * advantages
+                    # NOTE: ppo loss, 注意：已经没有critic loss了
+                    surr1 = importance_sampling_ratios * advantages
+                    surr2 = importance_sampling_ratios.clamp(1 - self.eps_clip, 1 + self.eps_clip) * advantages
                     policy_loss = - torch.min(surr1, surr2)
 
                 # entropy loss
@@ -485,7 +486,6 @@ class RLHFTrainer(Module):
                 loss = policy_loss.mean()
 
                 # update actor
-
                 self.accelerate.backward(loss)
 
                 self.print(f'policy_loss: {loss.item():.3f}')
@@ -495,7 +495,7 @@ class RLHFTrainer(Module):
 
                 self.actor_optim.step()
                 self.actor_optim.zero_grad()
-
+    # actor rollout
     def train(
         self,
         num_episodes = 50000,
@@ -568,7 +568,7 @@ class RLHFTrainer(Module):
 
                 mask = default(mask, lambda: torch.ones(sequence.shape, dtype = torch.bool, device = device))
 
-                rewards = self.reward_model(
+                rewards = self.reward_model.forward(
                     sequence,
                     prompt_mask = prompt_mask,
                     mask = mask,
