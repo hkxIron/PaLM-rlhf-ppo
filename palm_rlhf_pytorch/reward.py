@@ -46,7 +46,7 @@ class RewardModel(Module):
         self.reward_lora_scope = reward_lora_scope if use_lora else None
 
         if exists(self.reward_lora_scope):
-            self.palm.add_finetune_params(reward_lora_scope, lora_r = lora_r)
+            self.palm.add_lora_finetune_params(reward_lora_scope, lora_r = lora_r)
 
         dim = palm.dim
 
@@ -55,13 +55,13 @@ class RewardModel(Module):
         self.prompt_embed = nn.Parameter(torch.zeros(1, 1, dim))
         self.response_embed = nn.Parameter(torch.zeros(1, 1, dim))
 
+        # 多分类打分
         if self.binned_output:
             self.to_pred = nn.Linear(dim, num_binned_output)
         else:
-            self.to_pred = nn.Sequential(
-                nn.Linear(dim, 1, bias = False),
-                Rearrange('... 1 -> ...')
-            )
+            # 二分类打分
+            # [batch, seq_len, 1] -> [batch, seq_len]
+            self.to_pred = nn.Sequential(nn.Linear(dim, 1, bias = False), Rearrange('... 1 -> ...'))
 
         self.sample_from_bins = default(sample_from_bins, self.binned_output)
         self.sample_temperature = sample_temperature

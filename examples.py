@@ -29,11 +29,11 @@ prompt_mask = torch.zeros(1, 1024).bool().to(device) # which part of the sequenc
 labels = torch.randint(0, 5, (1,)).to(device)
 
 # train
-loss = reward_model(seq, prompt_mask = prompt_mask, labels = labels)
+loss = reward_model.forward(seq, prompt_mask = prompt_mask, labels = labels)
 accelerator.backward(loss)
 
 # after much training
-reward = reward_model(seq, prompt_mask = prompt_mask)
+reward = reward_model.forward(seq, prompt_mask = prompt_mask)
 
 
 # ready your list of prompts for reinforcement learning

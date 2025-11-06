@@ -44,6 +44,7 @@ PPOActionCriticReturn = namedtuple('PPOActionCriticReturn', [
 ])
 
 class ActorCritic(Module):
+    # beartype 是一个 Python 类型检查装饰器包，它在运行时强制检查函数参数和返回值的类型
     @beartype
     def __init__(
         self,
@@ -91,10 +92,10 @@ class ActorCritic(Module):
         self.critic_lora_scope = critic_lora_scope if critic_lora else None
 
         if self.actor_lora:
-            self.actor_palm.add_finetune_params(actor_lora_scope, lora_r = actor_lora_r)
+            self.actor_palm.add_lora_finetune_params(actor_lora_scope, lora_r = actor_lora_r)
 
         if self.critic_lora:
-            self.critic.add_finetune_params(critic_lora_scope, lora_r = critic_lora_r)
+            self.critic.add_lora_finetune_params(critic_lora_scope, lora_r = critic_lora_r)
 
         self.pooled_values = pooled_values
         self.value_head = nn.Identity()
@@ -362,6 +363,7 @@ class RLHFTrainer(Module):
         if exists(prompts):
             assert len(prompts) > 0, 'no prompts'
             assert exists(tokenizer), 'tokenizer must be passed in if raw text prompts are given'
+            # [batch, max_seq_len]
             prompt_token_ids = tokenizer(prompts)
 
         self.pad_value = pad_value # token pad value
@@ -642,6 +644,8 @@ class RLHFTrainer(Module):
 
                 rand_prompt_index = randrange(0, self.num_prompts)
 
+                # prompt_token_ids:[batch, max_seq_len]
+                # state:[batch, max_seq_len]
                 state = self.prompt_token_ids[rand_prompt_index]
 
                 # remove padding from state
@@ -649,22 +653,20 @@ class RLHFTrainer(Module):
                 state_mask = state != self.pad_value
                 state = state[state_mask]
 
+                """
+                rearrange(state, 'n ... -> 1 n ...')
+                # 等价于
+                result = state.unsqueeze(0)
+                # 或者
+                result = state[None, :] 
+                
+                ...（省略号）的作用是：
+                匹配任意数量的维度
+                保持这些维度不变
+                使代码更通用，适用于不同维度的张量
+                """
                 # get predicted sequence
-
-                (
-                    actions,
-                    sequence,
-                    mask,
-                    prompt_mask,
-                    action_logits,
-                    values_bins
-                ) = self.actor_critic_generate(
-                    rearrange(state, 'n ... -> 1 n ...'),
-                    max_seq_len = max_seq_len,
-                    eos_token = eos_token,
-                    temperature = temperature,
-                    return_values = True
-                )
+                ( actions, sequence, mask, prompt_mask, action_logits, values_bins) = self.actor_critic_generate(rearrange(state, 'n ... -> 1 n ...'), max_seq_len = max_seq_len, eos_token = eos_token, temperature = temperature, return_values = True )
 
                 action_logits = shift(action_logits, shift = 1, dim = -2) # need to shift along sequence dimension by 1, since actions start from the last prompt (state) token
 
@@ -708,7 +710,6 @@ class RLHFTrainer(Module):
                 ))))
 
                 # learn from the stored memories
-
                 if time % update_timesteps == 0:
                     self.learn(memories)
                     memories.clear()

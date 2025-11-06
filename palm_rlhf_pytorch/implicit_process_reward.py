@@ -22,7 +22,10 @@ def get_logprob_at(logits, seq):
     return rearrange(log_prob, '... 1 -> ...')
 
 class ImplicitPRM(Module):
-    """ PRM stands for process reward model, an openai paper that shows that rewarding the steps a model takes to its outcome is better than only rewarding based on final answer or outcome. basically same as when a teacher gives you some credit for showing your steps on an exam """
+    """ PRM stands for process reward model,
+    an openai paper that shows that rewarding the steps a model takes to its outcome is better than
+    only rewarding based on final answer or outcome. basically same as when a teacher gives you some credit
+    for showing your steps on an exam """
 
     def __init__(
         self,

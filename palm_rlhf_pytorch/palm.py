@@ -320,7 +320,7 @@ class PaLM(Module):
         self.finetune_modules = ModuleDict({})
 
         for scope in finetune_scopes:
-            self.add_finetune_params(scope)
+            self.add_lora_finetune_params(scope)
 
         # loss related
 
@@ -341,7 +341,8 @@ class PaLM(Module):
                 module.p = dropout
         return self
 
-    def add_finetune_params(self, scope, lora_r = None):
+    # 添加lora参数
+    def add_lora_finetune_params(self, scope, lora_r = None):
         assert scope not in self.finetune_modules, f'finetune scope {scope} already found'
         dim, dim_head, heads, r, device = self.dim, self.dim_head, self.heads, default(lora_r, self.lora_r), self.device
 

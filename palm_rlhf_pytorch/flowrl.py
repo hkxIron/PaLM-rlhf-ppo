@@ -72,7 +72,7 @@ class Actor(Module):
         self.actor_lora_scope = actor_lora_scope if actor_lora else None
 
         if self.actor_lora:
-            self.actor_palm.add_finetune_params(actor_lora_scope, lora_r = actor_lora_r)
+            self.actor_palm.add_lora_finetune_params(actor_lora_scope, lora_r = actor_lora_r)
 
     def parameters(self):
         if not self.actor_lora:
