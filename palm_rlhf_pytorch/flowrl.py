@@ -409,7 +409,7 @@ class FlowRLTrainer(Module):
 
         return best_sequence
 
-    def learn(
+    def update_model(
         self,
         memories: Deque[Memory]
     ):
@@ -607,7 +607,7 @@ class FlowRLTrainer(Module):
                 # learn from the stored memories
 
                 if divisible_by(time, update_timesteps):
-                    self.learn(memories)
+                    self.update_model(memories)
                     memories.clear()
 
         print('FlowRL training complete')

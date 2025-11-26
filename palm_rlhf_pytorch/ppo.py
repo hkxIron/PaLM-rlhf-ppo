@@ -504,7 +504,7 @@ class RLHFTrainer(Module):
 
         return best_sequence
 
-    def learn(
+    def update_model(
         self,
         memories: Deque[Memory]
     ):
@@ -516,6 +516,7 @@ class RLHFTrainer(Module):
 
         dataloader = create_dataloader(all_memories_stacked_and_padded, self.minibatch_size, device = self.device)
 
+        # 模型设为training状态, 可以进行梯度更新
         self.actor_critic.train()
 
         # PPO training
@@ -717,9 +718,10 @@ class RLHFTrainer(Module):
                     values_bins
                 ))))
 
+                # update the actor and critic networks
                 # learn from the stored memories
                 if time % update_timesteps == 0:
-                    self.learn(memories)
+                    self.update_model(memories)
                     memories.clear()
 
         print('rlhf training complete')

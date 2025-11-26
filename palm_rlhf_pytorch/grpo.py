@@ -360,6 +360,8 @@ class RLHFTrainer(Module):
         assert prompt.ndim == 1, 'only one prompt allowed at a time for now'
         prompt = repeat(prompt, 'n -> b n', b = num_samples)
 
+        # grpo里是去掉了critic model, 后来又用规则打分替换了reward model
+        # DAPO在grpo的基础上又去掉了kl loss
         actor = self.accelerate.unwrap_model(self.actor)
         reward_model = self.accelerate.unwrap_model(self.reward_model)
 
@@ -392,7 +394,7 @@ class RLHFTrainer(Module):
 
         return best_sequence
 
-    def learn(
+    def update_model(
         self,
         memories: Deque[Memory]
     ):
@@ -463,7 +465,6 @@ class RLHFTrainer(Module):
                 entropies = masked_mean(per_token_entropies, mask = action_masks)
 
                 # calculate clipped surrogate objective, classic PPO loss
-
                 importance_sampling_ratios = (action_log_probs - old_log_probs).exp()
 
                 # SPO - Line 14 Algorithm 1 - https://arxiv.org/abs/2401.16025v9
@@ -478,7 +479,6 @@ class RLHFTrainer(Module):
                     policy_loss = - torch.min(surr1, surr2)
 
                 # entropy loss
-
                 policy_loss = policy_loss.mean(dim = -1) - self.beta_s * entropies
 
                 # combine losses
@@ -495,6 +495,7 @@ class RLHFTrainer(Module):
 
                 self.actor_optim.step()
                 self.actor_optim.zero_grad()
+
     # actor rollout
     def train(
         self,
@@ -597,7 +598,7 @@ class RLHFTrainer(Module):
                 # learn from the stored memories
 
                 if divisible_by(time, update_timesteps):
-                    self.learn(memories)
+                    self.update_model(memories)
                     memories.clear()
 
         print('dr grpo rlhf training complete')
