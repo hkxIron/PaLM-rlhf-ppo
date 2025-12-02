@@ -545,6 +545,7 @@ class RLHFTrainer(Module):
                 # 只取response部分的log_probs
                 action_log_probs = action_log_probs[:, -action_len:]
 
+                # 计算action的熵
                 # calculate entropies, taking into account which part of the sequence is actually an action
                 entropies = masked_entropy(action_probs, mask = action_masks)
 
@@ -559,7 +560,6 @@ class RLHFTrainer(Module):
                 # NOTE: 并没有GAE
 
                 # convert binned value predictions to scalar value
-
                 to_pred_value_fn = self.critic_hl_gauss_loss.transform_from_logits
 
                 old_values, values = map(to_pred_value_fn, (old_values_pred, values_pred))
@@ -581,7 +581,6 @@ class RLHFTrainer(Module):
                     values = rearrange(values, '... -> ... 1')
 
                 # calculate clipped surrogate objective, classic PPO loss
-
                 importance_sampling_ratios = (action_log_probs - old_log_probs).exp()
                 advantages = masked_normalize(rewards - old_values, **normalize_kwargs)
 
@@ -589,10 +588,11 @@ class RLHFTrainer(Module):
                     advantages = rearrange(advantages, 'b -> b 1')
 
                 # PPO loss
-                surr1 = importance_sampling_ratios * advantages
-                surr2 = importance_sampling_ratios.clamp(1 - self.eps_clip, 1 + self.eps_clip) * advantages
-                # 保持熵越大越好, 即多样性会越高
-                actor_policy_loss = - torch.min(surr1, surr2) - self.beta_s * entropies
+                surr_no_clip = importance_sampling_ratios * advantages
+                surr_clip = importance_sampling_ratios.clamp(1 - self.eps_clip, 1 + self.eps_clip) * advantages
+                # policy loss: 重要性 * advantage
+                # 熵： 保持熵越大越好, 即多样性会越高
+                actor_policy_loss = - torch.min(surr_no_clip, surr_clip) - self.beta_s * entropies
 
                 # combine losses
                 loss = actor_policy_loss.mean()
@@ -676,6 +676,9 @@ class RLHFTrainer(Module):
                 使代码更通用，适用于不同维度的张量
                 """
                 # get predicted sequence
+                """
+                rollout
+                """
                 (actions, sequence, mask, prompt_mask, action_logits, values_bins) = self.actor_critic_generate.forward(rearrange(state, 'n ... -> 1 n ...'), max_seq_len = max_seq_len, eos_token = eos_token, temperature = temperature, return_values = True )
 
                 action_logits = shift(action_logits, shift = 1, dim = -2) # need to shift along sequence dimension by 1, since actions start from the last prompt (state) token
@@ -689,7 +692,6 @@ class RLHFTrainer(Module):
                 actions = rearrange(actions, '1 ... -> ...')
 
                 # get reward as given by supervised trained reward model
-
                 sequence = torch.cat((state, actions), dim = 0)
 
                 prompt_length = len(state)
@@ -699,12 +701,7 @@ class RLHFTrainer(Module):
                 prompt_mask = rearrange(prompt_mask, 'n -> 1 n')
                 mask = default(mask, lambda: torch.ones(sequence.shape, dtype = torch.bool, device = device))
 
-                reward = self.reward_model.forward(
-                    sequence,
-                    prompt_mask = prompt_mask,
-                    mask = mask
-                )
-
+                reward = self.reward_model.forward(sequence, prompt_mask = prompt_mask, mask = mask)
                 detach_to_cpu_fn = lambda t: rearrange(t.detach().cpu(), '1 ... -> ...')
 
                 # store memory for learning
