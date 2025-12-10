@@ -161,7 +161,7 @@ class ActorCritic(Module):
             mask = F.pad(mask, (1, -1), value = True) # include eos token
             action_mask &= mask
 
-        action_logits, value = self.forward(
+        action_logits, value = self.get_action_and_critic_value(
             sequence,
             mask = action_mask,
             return_values = return_values
@@ -176,7 +176,7 @@ class ActorCritic(Module):
             value
         )
 
-    def forward(
+    def get_action_and_critic_value(
         self,
         x,
         mask = None,
@@ -190,9 +190,9 @@ class ActorCritic(Module):
         if not return_values:
             return action_logits, None
 
-        if self.critic_is_prm:
-            values = self.critic.forward(x)
-            return action_logits, values
+        if self.critic_is_prm: # process reward model, 即每个token都给一个reward
+            critic_values = self.critic.forward(x)
+            return action_logits, critic_values
 
         critic_embeds = self.critic.forward(
             x,
@@ -204,9 +204,9 @@ class ActorCritic(Module):
             critic_embeds = shift(critic_embeds, shift = 1, dim = -2)
             critic_embeds = masked_mean(critic_embeds, mask, dim = 1)
 
-        values = self.value_head(critic_embeds)
+        critic_values = self.value_head(critic_embeds)
 
-        return action_logits, values
+        return action_logits, critic_values
 
 # data
 
@@ -535,7 +535,7 @@ class RLHFTrainer(Module):
 
                 action_masks = ~prompt_masks & masks
 
-                action_logits, values_pred = self.actor_critic.forward(trajectory_seq, mask = action_masks)
+                action_logits, values_pred = self.actor_critic.get_action_and_critic_value(trajectory_seq, mask = action_masks)
 
                 action_logits = shift(action_logits, shift = 1, dim = -2) # need to shift along sequence dimension by 1, since actions start from the last prompt (state) token
                 action_len = old_log_probs.shape[-1]
@@ -557,8 +557,7 @@ class RLHFTrainer(Module):
 
                 # subtract the kl penalty from the rewards
                 rewards = rewards - kl_penalty
-                # NOTE: 并没有GAE
-
+                # NOTE: 因为没有critic model计算V(t), 所以并没有GAE
                 # convert binned value predictions to scalar value
                 to_pred_value_fn = self.critic_hl_gauss_loss.transform_from_logits
 
@@ -574,6 +573,7 @@ class RLHFTrainer(Module):
                     # 只取response部分的critic_value
                     old_values = old_values[:, -action_len:]
                     values = values[:, -action_len:]
+                    # 此处的reward来源于reward模型打分，而不是规则
                     rewards = rearrange(rewards, 'b -> b 1')
                     normalize_kwargs = dict(dim = -1, mask = action_masks[:, -action_len:])
 
@@ -618,8 +618,9 @@ class RLHFTrainer(Module):
 
                 critic_value_loss = torch.maximum(value_loss_1, value_loss_2).mean()
 
+                # NOTE：actor/critic分别使用2个模型
                 self.print(f'critic_loss: {critic_value_loss.item():.3f}')
-
+                # update critic
                 self.accelerate.backward(critic_value_loss)
 
                 if exists(self.max_norm):
@@ -701,6 +702,7 @@ class RLHFTrainer(Module):
                 prompt_mask = rearrange(prompt_mask, 'n -> 1 n')
                 mask = default(mask, lambda: torch.ones(sequence.shape, dtype = torch.bool, device = device))
 
+                # NOTE：此处的reward来源于reward_model打分
                 reward = self.reward_model.forward(sequence, prompt_mask = prompt_mask, mask = mask)
                 detach_to_cpu_fn = lambda t: rearrange(t.detach().cpu(), '1 ... -> ...')
 

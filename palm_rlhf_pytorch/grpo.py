@@ -120,19 +120,9 @@ class Actor(Module):
             mask = action_mask,
         )        
 
-        return GRPOActionReturn(
-            actions,
-            sequence,
-            mask,
-            prompt_mask,
-            action_logits
-        )
+        return GRPOActionReturn(actions, sequence, mask, prompt_mask, action_logits)
 
-    def forward(
-        self,
-        x,
-        mask = None,
-    ):
+    def forward(self, x, mask = None,):
         return self.actor_palm(x, finetune_scope = self.actor_lora_scope)
 
 # data
@@ -381,6 +371,7 @@ class RLHFTrainer(Module):
             **kwargs
         )
 
+        # 此处的grpo还有reward,但去掉了critic model
         rewards = reward_model.forward(
             sequences,
             prompt_mask = prompt_mask,
@@ -580,7 +571,9 @@ class RLHFTrainer(Module):
                 # rewards are normalized for use as advantages
                 # following Dr. GRPO paper from Sea AI labs, remove the standard deviation
 
-                normalized_rewards = (rewards - rewards.mean()) / (action_sample_times + 1)
+                #normalized_rewards = (rewards - rewards.mean()) / (action_sample_times + 1)
+                # NOTE:减均值，除方差后，即为advantage
+                advantages = (rewards - rewards.mean()) / (action_sample_times + 1)
 
                 # store memory for learning
 
@@ -592,7 +585,8 @@ class RLHFTrainer(Module):
                     mask,
                     action_prob,
                     action_log_prob,
-                    normalized_rewards,
+                    advantages,
+                    #normalized_rewards,
                 )))])
 
                 # learn from the stored memories
